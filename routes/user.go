@@ -14,6 +14,7 @@ import (
 	"github.com/MicahParks/keyfunc"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/kataras/iris/v12"
+	jsonWT "github.com/kataras/iris/v12/middleware/jwt"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -99,7 +100,6 @@ func Login(ctx iris.Context) {
 		"lastName":  existingUser.LastName,
 		"email":     existingUser.Email,
 	})
-
 }
 
 func GoogleLoginOrSignUp(ctx iris.Context) {
@@ -168,7 +168,6 @@ func GoogleLoginOrSignUp(ctx iris.Context) {
 		utils.CreateEmailAlreadyRegistered(ctx)
 		return
 	}
-
 }
 
 func FacebookLoginOrSignUp(ctx iris.Context) {
@@ -307,6 +306,91 @@ func AppleLoginOrSignUp(ctx iris.Context) {
 		utils.CreateEmailAlreadyRegistered(ctx)
 		return
 	}
+}
+
+func ForgotPassword(ctx iris.Context) {
+	fmt.Println("Forgot password")
+	var emailInput EmailRegisteredInput
+	err := ctx.ReadJSON(&emailInput)
+	if err != nil {
+		utils.HandleValidationErrors(err, ctx)
+		return
+	}
+
+	var user models.User
+	userExists, userExistsErr := getAndHandleUserExists(&user, emailInput.Email)
+
+	if userExistsErr != nil {
+		utils.CreateInternalServerError(ctx)
+		return
+	}
+
+	if !userExists {
+		utils.CreateError(iris.StatusUnauthorized, "Credential Error", "Invalid email.", ctx)
+		return
+	}
+
+	if userExists {
+		if user.SocialLogin {
+			utils.CreateError(iris.StatusUnauthorized, "Credential Error", "Social Login Account", ctx)
+			return
+		}
+
+		link := "exp://192.168.0.143:8081/--/resetpassword/"
+		token, tokenErr := utils.CreateForgotPasswordToken(user.ID, user.Email)
+
+		if tokenErr != nil {
+			fmt.Println("Token error")
+			utils.CreateInternalServerError(ctx)
+			return
+		}
+
+		link += token
+		subject := "Forgot Your Password?"
+
+		html := `<p>
+		It looks like you forgot your password. If you did, please click the link below to reset it. If you did not, disregard this mail. Please update your password within 10 minutes, otherwise you will have to repeat this process. <a href= ` + link + `>Click to Reset Password</a>
+		</p><br />`
+
+		emailSent, emailSentErr := utils.SendMail(user.Email, subject, html)
+		if emailSentErr != nil {
+			fmt.Println("Email sending error: ", emailSentErr)
+			utils.CreateInternalServerError(ctx)
+			return
+		}
+		if emailSent {
+			ctx.JSON(iris.Map{
+				"emailSent": true,
+			})
+			return
+		}
+
+		ctx.JSON((iris.Map{"emailSent": false}))
+	}
+}
+
+func ResetPassword(ctx iris.Context) {
+	var password ResetPasswordInput
+	err := ctx.ReadJSON(&password)
+	if err != nil {
+		utils.HandleValidationErrors(err, ctx)
+		return
+	}
+
+	hashedPassword, hashErr := hashAndSaltPassword(password.Password)
+	if hashErr != nil {
+		utils.CreateInternalServerError(ctx)
+		return
+	}
+
+	claims := jsonWT.Get(ctx).(*utils.ForgotPasswordToken)
+
+	var user models.User
+	storage.DB.Model(&user).Where("id = ?", claims.ID).Update("password", hashedPassword)
+
+	ctx.JSON(iris.Map{
+		"passwordReset": true,
+	})
 
 }
 
@@ -366,4 +450,12 @@ type GoogleUserRes struct {
 	Name       string `json:"name"`
 	GivenName  string `json:"given_name"`
 	FamilyName string `json:"family_name"`
+}
+
+type EmailRegisteredInput struct {
+	Email string `json:"email" validate:"required"`
+}
+
+type ResetPasswordInput struct {
+	Password string `json:"password" validate:"required,min=8,max=256"`
 }
